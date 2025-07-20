@@ -78,7 +78,7 @@ fn tessellate_bezier(
     x1: f32, y1: f32, x2: f32, y2: f32, x3: f32, y3: f32, x4: f32, y4: f32,
     width: f32, color: [f32; 4]
 ) -> (Vec<Vertex>, Vec<u16>) {
-    let mut points = vec![];
+    let mut points = vec![Vertex { position: [x1, y1], color }];
     recursive_bezier(x1, y1, x2, y2, x3, y3, x4, y4, &mut points, color);
 
     let mut vertices = vec![];
