@@ -1,0 +1,11 @@
+[package]
+name = "wgpu_renderer"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+wgpu = "0.19.1"
+env_logger = "0.10"
+pollster = "0.3"
+bytemuck = { version = "1.12", features = ["derive"] }
+image = "0.24"
