@@ -21,6 +21,7 @@ fn tessellate_rectangle(x: f32, y: f32, width: f32, height: f32, color: [f32; 4]
 fn tessellate_circle(xc: f32, yc: f32, radius: f32, color: [f32; 4]) -> (Vec<Vertex>, Vec<u16>) {
     let mut vertices = vec![Vertex { position: [xc, yc], color }];
     let mut indices = vec![];
+    let step = 0.1 / radius;
     let mut angle: f32 = 0.0;
     let mut i = 1;
     while angle < 2.0 * std::f32::consts::PI {
@@ -31,10 +32,12 @@ fn tessellate_circle(xc: f32, yc: f32, radius: f32, color: [f32; 4]) -> (Vec<Ver
         indices.push(i);
         indices.push(i + 1);
         i += 1;
-        angle += 0.1;
+        angle += step;
     }
     let len = indices.len();
-    indices[len - 1] = 1;
+    if len > 0 {
+        indices[len - 1] = 1;
+    }
 
     (vertices, indices)
 }
@@ -273,11 +276,9 @@ mod tests {
     use std::path::Path;
 
     #[test]
-    fn test_render() {
+    fn test_render_square() {
         let state = pollster::block_on(State::new());
-
         let texture_size = 256u32;
-
         let texture_desc = wgpu::TextureDescriptor {
             size: wgpu::Extent3d {
                 width: texture_size,
@@ -295,14 +296,7 @@ mod tests {
         let texture = state.device.create_texture(&texture_desc);
         let texture_view = texture.create_view(&wgpu::TextureViewDescriptor::default());
 
-        let (quad_vertices, quad_indices) = tessellate_rectangle(-0.5, -0.5, 1.0, 1.0, [1.0, 0.0, 0.0, 1.0]);
-        let (circle_vertices, circle_indices) = tessellate_circle(0.0, 0.0, 0.25, [0.0, 1.0, 0.0, 1.0]);
-        let (bezier_vertices, bezier_indices) = tessellate_bezier(
-            -0.5, 0.5, -0.25, -0.5, 0.25, 0.5, 0.5, -0.5, 0.02, [0.0, 0.0, 1.0, 1.0]
-        );
-
-        let vertices = [quad_vertices, circle_vertices, bezier_vertices].concat();
-        let indices = [quad_indices, circle_indices, bezier_indices].concat();
+        let (vertices, indices) = tessellate_rectangle(-0.5, -0.5, 1.0, 1.0, [1.0, 0.0, 0.0, 1.0]);
 
         state.render(&texture_view, &vertices, &indices);
 
@@ -349,12 +343,274 @@ mod tests {
 
         let data = pollster::block_on(get_texture_data);
 
-        let snapshot_path = Path::new("snapshot.png");
+        let snapshot_path = Path::new("snapshot_square.png");
         if !snapshot_path.exists() {
             let image: ImageBuffer<Rgba<u8>, Vec<u8>> =
                 ImageBuffer::from_raw(texture_size, texture_size, data).unwrap();
             image.save(snapshot_path).unwrap();
-            println!("Snapshot created at snapshot.png");
+            println!("Snapshot created at snapshot_square.png");
+        } else {
+            let snapshot = image::open(snapshot_path).unwrap().to_rgba8();
+            let snapshot_data = snapshot.into_raw();
+            assert_eq!(data, snapshot_data, "Snapshot does not match");
+        }
+    }
+
+    #[test]
+    fn test_render_circle() {
+        let state = pollster::block_on(State::new());
+        let texture_size = 256u32;
+        let texture_desc = wgpu::TextureDescriptor {
+            size: wgpu::Extent3d {
+                width: texture_size,
+                height: texture_size,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::COPY_SRC | wgpu::TextureUsages::RENDER_ATTACHMENT,
+            label: None,
+            view_formats: &[],
+        };
+        let texture = state.device.create_texture(&texture_desc);
+        let texture_view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+        let (vertices, indices) = tessellate_circle(0.0, 0.0, 0.5, [0.0, 1.0, 0.0, 1.0]);
+
+        state.render(&texture_view, &vertices, &indices);
+
+        let get_texture_data = async {
+            let mut encoder =
+                state.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+            let buffer_size = (texture_size * texture_size * 4) as u64;
+            let buffer = state.device.create_buffer(&wgpu::BufferDescriptor {
+                label: None,
+                size: buffer_size,
+                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                mapped_at_creation: false,
+            });
+            encoder.copy_texture_to_buffer(
+                wgpu::ImageCopyTexture {
+                    texture: &texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::ImageCopyBuffer {
+                    buffer: &buffer,
+                    layout: wgpu::ImageDataLayout {
+                        offset: 0,
+                        bytes_per_row: Some(4 * texture_size),
+                        rows_per_image: Some(texture_size),
+                    },
+                },
+                texture_desc.size,
+            );
+            state.queue.submit(Some(encoder.finish()));
+
+            let buffer_slice = buffer.slice(..);
+            let (tx, rx) = std::sync::mpsc::channel();
+            buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
+                tx.send(result).unwrap();
+            });
+            state.device.poll(wgpu::Maintain::Wait);
+            rx.recv().unwrap().unwrap();
+            let data = buffer_slice.get_mapped_range().to_vec();
+            buffer.unmap();
+            data
+        };
+
+        let data = pollster::block_on(get_texture_data);
+
+        let snapshot_path = Path::new("snapshot_circle.png");
+        if !snapshot_path.exists() {
+            let image: ImageBuffer<Rgba<u8>, Vec<u8>> =
+                ImageBuffer::from_raw(texture_size, texture_size, data).unwrap();
+            image.save(snapshot_path).unwrap();
+            println!("Snapshot created at snapshot_circle.png");
+        } else {
+            let snapshot = image::open(snapshot_path).unwrap().to_rgba8();
+            let snapshot_data = snapshot.into_raw();
+            assert_eq!(data, snapshot_data, "Snapshot does not match");
+        }
+    }
+
+    #[test]
+    fn test_render_bezier() {
+        let state = pollster::block_on(State::new());
+        let texture_size = 256u32;
+        let texture_desc = wgpu::TextureDescriptor {
+            size: wgpu::Extent3d {
+                width: texture_size,
+                height: texture_size,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::COPY_SRC | wgpu::TextureUsages::RENDER_ATTACHMENT,
+            label: None,
+            view_formats: &[],
+        };
+        let texture = state.device.create_texture(&texture_desc);
+        let texture_view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+        let (vertices, indices) = tessellate_bezier(
+            -0.5, 0.5, -0.25, -0.5, 0.25, 0.5, 0.5, -0.5, 0.02, [0.0, 0.0, 1.0, 1.0]
+        );
+
+        state.render(&texture_view, &vertices, &indices);
+
+        let get_texture_data = async {
+            let mut encoder =
+                state.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+            let buffer_size = (texture_size * texture_size * 4) as u64;
+            let buffer = state.device.create_buffer(&wgpu::BufferDescriptor {
+                label: None,
+                size: buffer_size,
+                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                mapped_at_creation: false,
+            });
+            encoder.copy_texture_to_buffer(
+                wgpu::ImageCopyTexture {
+                    texture: &texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::ImageCopyBuffer {
+                    buffer: &buffer,
+                    layout: wgpu::ImageDataLayout {
+                        offset: 0,
+                        bytes_per_row: Some(4 * texture_size),
+                        rows_per_image: Some(texture_size),
+                    },
+                },
+                texture_desc.size,
+            );
+            state.queue.submit(Some(encoder.finish()));
+
+            let buffer_slice = buffer.slice(..);
+            let (tx, rx) = std::sync::mpsc::channel();
+            buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
+                tx.send(result).unwrap();
+            });
+            state.device.poll(wgpu::Maintain::Wait);
+            rx.recv().unwrap().unwrap();
+            let data = buffer_slice.get_mapped_range().to_vec();
+            buffer.unmap();
+            data
+        };
+
+        let data = pollster::block_on(get_texture_data);
+
+        let snapshot_path = Path::new("snapshot_bezier.png");
+        if !snapshot_path.exists() {
+            let image: ImageBuffer<Rgba<u8>, Vec<u8>> =
+                ImageBuffer::from_raw(texture_size, texture_size, data).unwrap();
+            image.save(snapshot_path).unwrap();
+            println!("Snapshot created at snapshot_bezier.png");
+        } else {
+            let snapshot = image::open(snapshot_path).unwrap().to_rgba8();
+            let snapshot_data = snapshot.into_raw();
+            assert_eq!(data, snapshot_data, "Snapshot does not match");
+        }
+    }
+
+    #[test]
+    fn test_render_combined() {
+        let state = pollster::block_on(State::new());
+
+        let texture_size = 256u32;
+
+        let texture_desc = wgpu::TextureDescriptor {
+            size: wgpu::Extent3d {
+                width: texture_size,
+                height: texture_size,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::COPY_SRC | wgpu::TextureUsages::RENDER_ATTACHMENT,
+            label: None,
+            view_formats: &[],
+        };
+        let texture = state.device.create_texture(&texture_desc);
+        let texture_view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+        let (quad_vertices, quad_indices) = tessellate_rectangle(-0.5, -0.5, 1.0, 1.0, [1.0, 0.0, 0.0, 1.0]);
+        let (circle_vertices, circle_indices) = tessellate_circle(0.0, 0.0, 0.75, [0.0, 1.0, 0.0, 1.0]);
+        let (bezier_vertices, bezier_indices) = tessellate_bezier(
+            -0.5, 0.5, -0.25, -0.5, 0.25, 0.5, 0.5, -0.5, 0.02, [0.0, 0.0, 1.0, 1.0]
+        );
+
+        let mut vertices = vec![];
+        let mut indices = vec![];
+
+        let mut vertex_offset = 0;
+        for (v, i) in [(quad_vertices, quad_indices), (circle_vertices, circle_indices), (bezier_vertices, bezier_indices)] {
+            vertices.extend(v);
+            indices.extend(i.iter().map(|i| i + vertex_offset));
+            vertex_offset = vertices.len() as u16;
+        }
+
+
+        state.render(&texture_view, &vertices, &indices);
+
+        let get_texture_data = async {
+            let mut encoder =
+                state.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+            let buffer_size = (texture_size * texture_size * 4) as u64;
+            let buffer = state.device.create_buffer(&wgpu::BufferDescriptor {
+                label: None,
+                size: buffer_size,
+                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                mapped_at_creation: false,
+            });
+            encoder.copy_texture_to_buffer(
+                wgpu::ImageCopyTexture {
+                    texture: &texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::ImageCopyBuffer {
+                    buffer: &buffer,
+                    layout: wgpu::ImageDataLayout {
+                        offset: 0,
+                        bytes_per_row: Some(4 * texture_size),
+                        rows_per_image: Some(texture_size),
+                    },
+                },
+                texture_desc.size,
+            );
+            state.queue.submit(Some(encoder.finish()));
+
+            let buffer_slice = buffer.slice(..);
+            let (tx, rx) = std::sync::mpsc::channel();
+            buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
+                tx.send(result).unwrap();
+            });
+            state.device.poll(wgpu::Maintain::Wait);
+            rx.recv().unwrap().unwrap();
+            let data = buffer_slice.get_mapped_range().to_vec();
+            buffer.unmap();
+            data
+        };
+
+        let data = pollster::block_on(get_texture_data);
+
+        let snapshot_path = Path::new("snapshot_combined.png");
+        if !snapshot_path.exists() {
+            let image: ImageBuffer<Rgba<u8>, Vec<u8>> =
+                ImageBuffer::from_raw(texture_size, texture_size, data).unwrap();
+            image.save(snapshot_path).unwrap();
+            println!("Snapshot created at snapshot_combined.png");
         } else {
             let snapshot = image::open(snapshot_path).unwrap().to_rgba8();
             let snapshot_data = snapshot.into_raw();
